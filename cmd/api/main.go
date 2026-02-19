@@ -11,6 +11,7 @@ import (
 	"github.com/Chintukr2004/pulsestream/internal/handler"
 	"github.com/Chintukr2004/pulsestream/internal/model"
 	"github.com/Chintukr2004/pulsestream/internal/store"
+	"github.com/Chintukr2004/pulsestream/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -37,7 +38,11 @@ func main() {
 	postStore := store.NewPostStore(dbpool)
 
 	postsChan := make(chan model.Post, 100)
-	//keep app alive
+
+	hub := ws.NewHub()
+	go hub.Run()
+
+	//generator
 	go func() {
 		for {
 			post := generator.GeneratePost()
@@ -56,12 +61,11 @@ func main() {
 
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				err := postStore.Insert(ctx, post)
+				cancel()
 				if err != nil {
-					fmt.Printf("Worker %d failed to insert: %v\n", id, err)
 					continue
 				}
-				cancel()
-
+				hub.Broadcast(post)
 				fmt.Printf("Worker %d inserted post: %s\n", id, post.Content)
 
 			}
@@ -71,6 +75,9 @@ func main() {
 	postHandler := handler.NewPostHandler(postStore)
 
 	http.HandleFunc("/posts", postHandler.GetPosts)
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		ws.ServeWS(hub, w, r)
+	})
 
 	go func() {
 		fmt.Println("Http server running on port:8000")

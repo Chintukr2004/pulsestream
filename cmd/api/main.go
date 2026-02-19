@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/Chintukr2004/pulsestream/internal/generator"
+	"github.com/Chintukr2004/pulsestream/internal/handler"
 	"github.com/Chintukr2004/pulsestream/internal/model"
 	"github.com/Chintukr2004/pulsestream/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,6 +67,19 @@ func main() {
 			}
 		}(i)
 	}
+
+	postHandler := handler.NewPostHandler(postStore)
+
+	http.HandleFunc("/posts", postHandler.GetPosts)
+
+	go func() {
+		fmt.Println("Http server running on port:8000")
+		err := http.ListenAndServe(":8080", nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+	}()
 	select {}
 
 }

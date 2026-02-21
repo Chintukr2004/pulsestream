@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +22,10 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -58,7 +64,7 @@ func main() {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("Generator shutting down...")
+				logger.Info("Generator shutting down")
 				return
 			default:
 				post := generator.GeneratePost()
@@ -68,6 +74,8 @@ func main() {
 
 		}
 	}()
+
+	var postCount int64
 
 	//worker pool
 
@@ -80,21 +88,55 @@ func main() {
 			for {
 				select {
 				case <-ctx.Done():
-					fmt.Printf("Worker %d shutting down...\n", id)
+					logger.Info("Worker shutting down", "worker_id", id)
 					return
 				case post := <-postsChan:
+					start := time.Now()
 					ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
 					err := postStore.Insert(ctxTimeout, post)
 					cancel()
+
+					duration := time.Since(start)
+
 					if err != nil {
+						logger.Error("failed to insert post",
+							"worker_id", id,
+							"error", err,
+						)
 						continue
 					}
 					hub.Broadcast(post)
-					// fmt.Printf("Worker %d inserted post: %s\n", id, post.Content)
+					atomic.AddInt64(&postCount, 1)
+					logger.Info("post inserted",
+						"worker_id", id,
+						"username", post.Username,
+						"duration_ms", duration.Milliseconds())
 				}
 			}
 		}(i)
 	}
+
+	// monitoring goroutine
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				count := atomic.SwapInt64(&postCount, 0)
+				logger.Info("throuput report",
+					"post_last_5s", count,
+					"post_per_sec", float64(count)/5,
+				)
+			}
+		}
+	}()
+
+	//Handlers
 
 	postHandler := handler.NewPostHandler(postStore)
 
@@ -103,8 +145,9 @@ func main() {
 		ws.ServeWS(hub, w, r)
 	})
 
+	// server setup
 	go func() {
-		fmt.Println("Http server running on port:8000")
+		logger.Info("Http server started", "port", 8080)
 		err := http.ListenAndServe(":8080", nil)
 		if err != nil {
 			log.Fatal(err)
@@ -113,7 +156,7 @@ func main() {
 	}()
 
 	<-sigChan
-	fmt.Println("Shutdown signal recived...")
+	logger.Info("Shutdown signal recived...")
 	cancel()
 	wg.Wait()
 

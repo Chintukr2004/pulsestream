@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Chintukr2004/pulsestream/internal/generator"
@@ -16,7 +20,12 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	var wg sync.WaitGroup
 
 	dbURL := "postgres://postgres:1234@localhost:5432/pulsestream"
 
@@ -43,11 +52,20 @@ func main() {
 	go hub.Run()
 
 	//generator
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
-			post := generator.GeneratePost()
-			postsChan <- post
-			time.Sleep(1 * time.Second)
+			select {
+			case <-ctx.Done():
+				fmt.Println("Generator shutting down...")
+				return
+			default:
+				post := generator.GeneratePost()
+				postsChan <- post
+				time.Sleep(1 * time.Second)
+			}
+
 		}
 	}()
 
@@ -56,18 +74,24 @@ func main() {
 	workerCount := 3
 
 	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
 		go func(id int) {
-			for post := range postsChan {
-
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				err := postStore.Insert(ctx, post)
-				cancel()
-				if err != nil {
-					continue
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Printf("Worker %d shutting down...\n", id)
+					return
+				case post := <-postsChan:
+					ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+					err := postStore.Insert(ctxTimeout, post)
+					cancel()
+					if err != nil {
+						continue
+					}
+					hub.Broadcast(post)
+					// fmt.Printf("Worker %d inserted post: %s\n", id, post.Content)
 				}
-				hub.Broadcast(post)
-				fmt.Printf("Worker %d inserted post: %s\n", id, post.Content)
-
 			}
 		}(i)
 	}
@@ -87,6 +111,13 @@ func main() {
 		}
 
 	}()
-	select {}
+
+	<-sigChan
+	fmt.Println("Shutdown signal recived...")
+	cancel()
+	wg.Wait()
+
+	fmt.Println("All goroutines stopped.")
+	fmt.Println("Closing DB...")
 
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -16,9 +17,11 @@ import (
 	"github.com/Chintukr2004/pulsestream/internal/generator"
 	"github.com/Chintukr2004/pulsestream/internal/handler"
 	"github.com/Chintukr2004/pulsestream/internal/model"
+	"github.com/Chintukr2004/pulsestream/internal/redisclient"
 	"github.com/Chintukr2004/pulsestream/internal/store"
 	"github.com/Chintukr2004/pulsestream/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -52,7 +55,13 @@ func main() {
 	fmt.Println("PulseStream server started..")
 	postStore := store.NewPostStore(dbpool)
 
-	postsChan := make(chan model.Post, 100)
+	//redis
+	redisClient := redisclient.NewClient()
+
+	const (
+		streamName    = "posts_stream"
+		consumerGroup = "workers_group"
+	)
 
 	hub := ws.NewHub()
 	go hub.Run()
@@ -68,7 +77,18 @@ func main() {
 				return
 			default:
 				post := generator.GeneratePost()
-				postsChan <- post
+				data, err := json.Marshal(post)
+				if err != nil {
+					logger.Error("failed to marshal post", "error", err)
+					continue
+				}
+
+				err = redisclient.AddToStream(ctx, redisClient, streamName, map[string]interface{}{
+					"data": string(data),
+				})
+				if err != nil {
+					logger.Error("failed to add to stream", "error", err)
+				}
 				time.Sleep(1 * time.Second)
 			}
 
@@ -77,40 +97,84 @@ func main() {
 
 	var postCount int64
 
+	err = redisclient.CreateConsumerGroup(ctx, redisClient, streamName, consumerGroup)
+	if err != nil {
+		logger.Error("failed to create consumer group", "error", err)
+		return
+	}
+
 	//worker pool
 
-	workerCount := 3
-
+	workerCount := 10
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
+
 		go func(id int) {
 			defer wg.Done()
+
+			consumerName := fmt.Sprintf("worker-%d", id)
+
 			for {
 				select {
 				case <-ctx.Done():
-					logger.Info("Worker shutting down", "worker_id", id)
+					logger.Info("worker shutting down", "worker_id", id)
 					return
-				case post := <-postsChan:
-					start := time.Now()
-					ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
-					err := postStore.Insert(ctxTimeout, post)
-					cancel()
+				default:
+					streams, err := redisClient.XReadGroup(ctx, &redis.XReadGroupArgs{
+						Group:    consumerGroup,
+						Consumer: consumerName,
+						Streams:  []string{streamName, ">"},
+						Count:    1,
+						Block:    5 * time.Second,
+					}).Result()
 
-					duration := time.Since(start)
-
-					if err != nil {
-						logger.Error("failed to insert post",
-							"worker_id", id,
-							"error", err,
-						)
+					if err != nil && err != redis.Nil {
+						logger.Error("XReadGroup error", "error", err)
 						continue
 					}
-					hub.Broadcast(post)
-					atomic.AddInt64(&postCount, 1)
-					logger.Info("post inserted",
-						"worker_id", id,
-						"username", post.Username,
-						"duration_ms", duration.Milliseconds())
+
+					for _, stream := range streams {
+						for _, message := range stream.Messages {
+
+							payload := message.Values["data"].(string)
+
+							var post model.Post
+							err := json.Unmarshal([]byte(payload), &post)
+							if err != nil {
+								logger.Error("failed to unmarshal", "error", err)
+								continue
+							}
+
+							start := time.Now()
+
+							ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+							err = postStore.Insert(ctxTimeout, post)
+							cancel()
+
+							duration := time.Since(start)
+
+							if err != nil {
+								logger.Error("DB insert failed",
+									"worker_id", id,
+									"error", err,
+								)
+								continue
+							}
+
+							// ACK message
+							err = redisClient.XAck(ctx, streamName, consumerGroup, message.ID).Err()
+							if err != nil {
+								logger.Error("failed to ack message", "error", err)
+							}
+
+							hub.Broadcast(post)
+
+							logger.Info("post processed via stream",
+								"worker_id", id,
+								"duration_ms", duration.Milliseconds(),
+							)
+						}
+					}
 				}
 			}
 		}(i)

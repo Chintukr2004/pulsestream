@@ -10,7 +10,7 @@ import (
 
 func NewClient() *redis.Client {
 	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: "redis:6379",
 	})
 
 	err := client.Ping(context.Background()).Err()

@@ -36,23 +36,32 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	var wg sync.WaitGroup
 
-	dbURL := "postgres://postgres:1234@localhost:5432/pulsestream"
+	dbURL := "postgres://postgres:password@postgres:5432/pulsestream"
 
-	dbpool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		log.Fatalf("unable to connect database: %v", err)
+	var dbpool *pgxpool.Pool
+	var err error
+
+	for i := 0; i < 10; i++ {
+		dbpool, err = pgxpool.New(ctx, dbURL)
+		if err == nil {
+			err = dbpool.Ping(ctx)
+			if err == nil {
+				break
+			}
+		}
+
+		logger.Info("waiting for database...", "attempt", i+1)
+		time.Sleep(2 * time.Second)
 	}
 
-	defer dbpool.Close()
-
-	fmt.Println("Connected to database")
-
-	err = dbpool.Ping(ctx)
 	if err != nil {
-		log.Fatalf("Database ping failed: %v", err)
-
+		logger.Error("could not connect to database after retries", "error", err)
+		return
 	}
-	fmt.Println("PulseStream server started..")
+
+	logger.Info("connected to database")
+
+	// fmt.Println("PulseStream server started..")
 	postStore := store.NewPostStore(dbpool)
 
 	//redis
@@ -105,7 +114,7 @@ func main() {
 
 	//worker pool
 
-	workerCount := 10
+	workerCount := 3
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 

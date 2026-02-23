@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Chintukr2004/pulsestream/internal/db"
 	"github.com/Chintukr2004/pulsestream/internal/generator"
 	"github.com/Chintukr2004/pulsestream/internal/handler"
 	"github.com/Chintukr2004/pulsestream/internal/model"
@@ -60,6 +61,8 @@ func main() {
 	}
 
 	logger.Info("connected to database")
+
+	db.RunMigrations(dbURL)
 
 	// fmt.Println("PulseStream server started..")
 	postStore := store.NewPostStore(dbpool)

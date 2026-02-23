@@ -13,9 +13,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o app cmd/api/main.go
 # ---- Runtime Stage ----
 FROM alpine:latest
 
-WORKDIR /root/
+WORKDIR /app
 
 COPY --from=builder /app/app .
+COPY --from=builder /app/migrations ./migrations
 
 EXPOSE 8080
 
